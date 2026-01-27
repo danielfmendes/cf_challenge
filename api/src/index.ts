@@ -7,75 +7,79 @@ export interface Env {
     INGESTION_WORKFLOW: Workflow;
 }
 
-// Helper for standard JSON responses
+// 1. Centralized CORS & Response Helper
+const corsHeaders = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+};
+
 const jsonResponse = (data: any, status = 200) => new Response(JSON.stringify(data), {
-    status,
-    headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type",
-        "Content-Type": "application/json"
-    }
+    status, headers: {...corsHeaders, "Content-Type": "application/json"}
 });
 
 export default {
-    async fetch(request: Request, env: Env) {
-        const url = new URL(request.url);
+    async fetch(req: Request, env: Env) {
+        if (req.method === "OPTIONS") return new Response(null, {headers: corsHeaders});
 
-        // CORS Preflight
-        if (request.method === "OPTIONS") {
-            return new Response(null, {
-                headers: {
-                    "Access-Control-Allow-Origin": "*",
-                    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-                    "Access-Control-Allow-Headers": "Content-Type"
-                }
-            });
-        }
+        const url = new URL(req.url);
+        // Normalize path: removes '/api' prefix to make routing cleaner
+        const path = url.pathname.replace('/api', '');
 
         try {
-            // --- POST: INGEST (uses Workflow) ---
-            if (request.method === 'POST' && url.pathname === '/api/ingest') {
-                const body = await request.json() as any;
-                const uniqueId = crypto.randomUUID();
+            // --- POST ROUTES ---
+            if (req.method === 'POST' && path === '/ingest') {
+                const body: any = await req.json();
+                const id = crypto.randomUUID();
 
-                // Trigger the Workflow
                 await env.INGESTION_WORKFLOW.create({
-                    id: uniqueId,
+                    id, // Match DB ID for easier lookup
                     params: {
-                        id: uniqueId,
+                        id,
                         content: body.content,
                         source: body.source || 'Unknown',
                         author: body.author || 'Anon',
                         timestamp: body.timestamp || new Date().toISOString()
                     }
                 });
-
-                // Return immediately (Fire & Forget)
-                return jsonResponse({success: true, id: uniqueId, status: "queued"});
+                return jsonResponse({success: true, id, status: "queued"});
             }
 
-            if (request.method === 'GET' && url.pathname === '/api/stats') {
-                const total = await env.DB.prepare("SELECT COUNT(*) as count FROM feedback").first('count');
-                const critical = await env.DB.prepare("SELECT COUNT(*) as count FROM feedback WHERE urgency_score >= 4").first('count');
-                const sentiment = await env.DB.prepare("SELECT sentiment_score FROM feedback GROUP BY sentiment_score ORDER BY COUNT(*) DESC LIMIT 1").first();
-                return jsonResponse({total, critical, top_sentiment: sentiment?.sentiment_score || 'neutral'});
-            }
+            // --- GET ROUTES ---
+            if (req.method === 'GET') {
+                if (path === '/stats') {
+                    const total = await env.DB.prepare("SELECT COUNT(*) as count FROM feedback").first('count');
+                    const critical = await env.DB.prepare("SELECT COUNT(*) as count FROM feedback WHERE urgency_score >= 4").first('count');
+                    const sentiment: any = await env.DB.prepare("SELECT sentiment_score FROM feedback GROUP BY sentiment_score ORDER BY COUNT(*) DESC LIMIT 1").first();
+                    return jsonResponse({total, critical, top_sentiment: sentiment?.sentiment_score || 'neutral'});
+                }
 
-            if (request.method === 'GET' && url.pathname === '/api/list') {
-                const {results} = await env.DB.prepare("SELECT * FROM feedback ORDER BY created_at DESC LIMIT 20").all();
-                return jsonResponse(results);
-            }
+                if (path === '/list') {
+                    const {results} = await env.DB.prepare("SELECT * FROM feedback ORDER BY created_at DESC LIMIT 20").all();
+                    return jsonResponse(results);
+                }
 
-            if (request.method === 'GET' && url.pathname.startsWith('/api/issue/')) {
-                const id = url.pathname.split('/').pop();
-                const item = await env.DB.prepare("SELECT * FROM feedback WHERE id = ?").bind(id).first();
-                return item ? jsonResponse(item) : jsonResponse({error: "Not Found"}, 404);
-            }
+                if (path === '/charts') {
+                    const {results} = await env.DB.prepare("SELECT sentiment_score, COUNT(*) as count FROM feedback GROUP BY sentiment_score").all();
+                    return jsonResponse(results);
+                }
 
-            if (request.method === 'GET' && url.pathname === '/api/charts') {
-                const {results} = await env.DB.prepare("SELECT sentiment_score, COUNT(*) as count FROM feedback GROUP BY sentiment_score").all();
-                return jsonResponse(results);
+                // Handle dynamic ID routes (issue/xyz or status/xyz)
+                if (path.startsWith('/issue/')) {
+                    const id = path.split('/').pop();
+                    const item = await env.DB.prepare("SELECT * FROM feedback WHERE id = ?").bind(id).first();
+                    return item ? jsonResponse(item) : jsonResponse({error: "Not Found"}, 404);
+                }
+
+                if (path.startsWith('/status/')) {
+                    const id = path.split('/').pop();
+                    try {
+                        const instance = await env.INGESTION_WORKFLOW.get(id!);
+                        return jsonResponse(await instance.status());
+                    } catch {
+                        return jsonResponse({status: "unknown", error: "Workflow not found"}, 404);
+                    }
+                }
             }
 
             return jsonResponse({error: "Not Found"}, 404);
