@@ -5,7 +5,6 @@ import {
 } from "@/components/ui/dialog";
 import {Tabs, TabsList, TabsTrigger, TabsContent} from "@/components/ui/tabs";
 import {Button} from "@/components/ui/button";
-import {Badge} from "@/components/ui/badge";
 import {Play, Loader2, CheckCircle2, AlertCircle, Braces, List, RefreshCw, Check, X} from "lucide-react";
 import {api} from "@/lib/api";
 import {INITIAL_LOAD_JSON, SINGLE_TEMPLATE} from "../../public/template.ts";
@@ -16,6 +15,8 @@ export function IngestionPlayground() {
     const [bulkInput, setBulkInput] = useState(JSON.stringify(INITIAL_LOAD_JSON, null, 2));
 
     const [isLoading, setIsLoading] = useState(false);
+    const [isPolling, setIsPolling] = useState(false);
+
     const [response, setResponse] = useState<any>(null);
     const [progress, setProgress] = useState({current: 0, total: 0});
     const [open, setOpen] = useState(false);
@@ -37,23 +38,18 @@ export function IngestionPlayground() {
         window.dispatchEvent(new Event("feedback-updated"));
     };
 
-    // --- LOGIC: Handle closing & updates ---
-    // This function MUST be called to close the dialog if we want the refresh event to fire
     const handleOpenChange = (isOpen: boolean) => {
         if (!isOpen) {
-            // Only notify if we are closing AND have successful updates
             if (hasUpdates) {
                 notifyUpdate();
             }
         }
-
         setOpen(isOpen);
-
-        // Reset state only when Opening fresh
         if (isOpen) {
             setResponse(null);
             setProgress({current: 0, total: 0});
             setIsLoading(false);
+            setIsPolling(false);
             setHasUpdates(false);
         }
     };
@@ -61,7 +57,20 @@ export function IngestionPlayground() {
     const handleReset = () => {
         setResponse(null);
         setProgress({current: 0, total: 0});
-        // We do NOT reset hasUpdates here, so if they run 2 batches, both count towards the final refresh
+    };
+
+    const wait = (ms: any) => new Promise(r => setTimeout(r, ms));
+    const waitForCompletion = async (id: any, maxAttempts = 20) => {
+        for (let i = 0; i < maxAttempts; i++) {
+            try {
+                const {status} = await api.getStatus(id);
+                if (['complete', 'success'].includes(status)) return true;
+                if (['errored', 'failed'].includes(status)) return false;
+            } catch (e) { /* ignore network blips */
+            }
+            await wait(1000);
+        }
+        return false;
     };
 
     const handleSimulate = async () => {
@@ -73,31 +82,55 @@ export function IngestionPlayground() {
             if (mode === 'single') {
                 const payload = JSON.parse(jsonInput);
                 const data = await api.ingest(payload);
+
+                // Start Polling UI
+                setIsLoading(false);
+                setIsPolling(true);
+
+                // Wait for the workflow to actually finish saving the data
+                await waitForCompletion(data.id);
+                setIsPolling(false);
                 setResponse({type: 'single', ...data});
-                setHasUpdates(true); // Mark as updated
+                setHasUpdates(true);
+
             } else {
                 const items = JSON.parse(bulkInput);
                 if (!Array.isArray(items)) throw new Error("Bulk input must be an array");
 
                 setProgress({current: 0, total: items.length});
                 let successCount = 0;
+                let lastId = "";
 
+                // Send all items to the queue
                 for (let i = 0; i < items.length; i++) {
                     try {
-                        await api.ingest(items[i]);
+                        const res = await api.ingest(items[i]);
                         successCount++;
+                        lastId = res.id;
                         setProgress({current: i + 1, total: items.length});
-                        setHasUpdates(true); // Mark as updated
                     } catch (e) {
                         console.error("Item failed", e);
                     }
                 }
+
+                // Wait for the LAST item to appear in DB (assuming FIFO-ish processing)
+                if (lastId) {
+                    setIsLoading(false);
+                    setIsPolling(true);
+                    await waitForCompletion(lastId);
+                    setIsPolling(false);
+                }
+
+                setHasUpdates(true);
                 setResponse({type: 'bulk', count: successCount});
             }
         } catch (error) {
+            setIsLoading(false);
+            setIsPolling(false);
             setResponse({error: "Failed to parse JSON or Network Error"});
         } finally {
             setIsLoading(false);
+            setIsPolling(false);
         }
     };
 
@@ -119,7 +152,6 @@ export function IngestionPlayground() {
                 </DialogHeader>
 
                 <div className="flex flex-col gap-4 py-2">
-                    {/* Controlled Tabs */}
                     <Tabs value={mode} onValueChange={setMode} className="w-full">
                         <TabsList className="grid w-full grid-cols-2 mb-4">
                             <TabsTrigger value="single" className="gap-2"><Braces size={14}/> Single Item</TabsTrigger>
@@ -127,15 +159,13 @@ export function IngestionPlayground() {
                         </TabsList>
 
                         <div
-                            className={`transition-opacity duration-300 ${response ? 'opacity-50 pointer-events-none grayscale' : 'opacity-100'}`}>
+                            className={`transition-opacity duration-300 ${response || isPolling ? 'opacity-50 pointer-events-none grayscale' : 'opacity-100'}`}>
                             <TabsContent value="single" className="space-y-4 m-0">
                                 <div
                                     className="h-[300px] md:h-[400px] border rounded-md overflow-hidden dark:border-zinc-800">
                                     <Editor height="100%" defaultLanguage="json" value={jsonInput}
                                             onChange={(val) => setJsonInput(val || "")} theme={editorTheme} options={{
-                                        minimap: {enabled: false},
-                                        fontSize: 14,
-                                        padding: {top: 16, bottom: 16}
+                                        minimap: {enabled: false}, fontSize: 14, padding: {top: 16, bottom: 16}
                                     }}/>
                                 </div>
                             </TabsContent>
@@ -145,19 +175,18 @@ export function IngestionPlayground() {
                                     className="h-[300px] md:h-[400px] border rounded-md overflow-hidden dark:border-zinc-800">
                                     <Editor height="100%" defaultLanguage="json" value={bulkInput}
                                             onChange={(val) => setBulkInput(val || "")} theme={editorTheme} options={{
-                                        minimap: {enabled: true},
-                                        fontSize: 13,
-                                        padding: {top: 16, bottom: 16}
+                                        minimap: {enabled: true}, fontSize: 13, padding: {top: 16, bottom: 16}
                                     }}/>
                                 </div>
                             </TabsContent>
                         </div>
                     </Tabs>
 
+                    {/* Loading State (Sending Data) */}
                     {isLoading && mode === 'bulk' && (
                         <div className="space-y-2 animate-in fade-in slide-in-from-bottom-2">
                             <div className="flex justify-between text-xs text-muted-foreground font-medium">
-                                <span>Processing...</span>
+                                <span>Sending Requests...</span>
                                 <span>{Math.round(progressPercent)}%</span>
                             </div>
                             <div className="h-2 w-full rounded-full bg-zinc-100 dark:bg-zinc-800 overflow-hidden">
@@ -167,8 +196,25 @@ export function IngestionPlayground() {
                         </div>
                     )}
 
-                    {/* Result Area */}
-                    {response && (
+                    {/* Polling State (Waiting for Workflow) */}
+                    {isPolling && (
+                        <div
+                            className="rounded-lg border bg-amber-50/50 border-amber-200 dark:bg-amber-900/10 dark:border-amber-900/30 p-4 animate-in fade-in zoom-in-95 duration-300">
+                            <div className="flex items-center gap-3">
+                                <Loader2 className="h-5 w-5 animate-spin text-amber-600"/>
+                                <div className="flex-1">
+                                    <h4 className="text-sm font-semibold text-amber-900 dark:text-amber-500">Processing
+                                        Workflow...</h4>
+                                    <p className="text-xs text-amber-700/80 dark:text-amber-500/70">
+                                        Waiting for AI analysis and Vector Embedding to complete.
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Result Area (Only shows AFTER polling is done) */}
+                    {response && !isPolling && (
                         <div
                             className="rounded-lg border bg-zinc-50/50 dark:bg-zinc-900/50 p-4 animate-in zoom-in-95 duration-200">
                             <div className="flex items-start gap-3">
@@ -189,26 +235,22 @@ export function IngestionPlayground() {
                                         <h4 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
                                             {response.error ? "Ingestion Failed" : "Processing Complete"}
                                         </h4>
-                                        {/* FIX: Call handleOpenChange(false) here too */}
                                         <Button size="sm" variant="ghost" onClick={() => handleOpenChange(false)}
                                                 className="h-6 w-6 p-0 hover:bg-zinc-200 dark:hover:bg-zinc-800 rounded-full">
                                             <X size={14}/>
                                         </Button>
                                     </div>
 
-                                    {!response.error && response.type === 'single' && response.enriched && (
+                                    {!response.error && response.type === 'single' && (
                                         <div className="text-xs text-muted-foreground">
-                                            Identified as <Badge variant="outline"
-                                                                 className="mx-1 h-5 px-1.5 text-[10px]">{response.enriched.sentiment}</Badge>
-                                            sentiment. Added to dashboard.
+                                            Sentiment Analysis & Vector Embedding complete.
                                         </div>
                                     )}
 
                                     {!response.error && response.type === 'bulk' && (
                                         <p className="text-xs text-muted-foreground">
-                                            Successfully ingested <span
-                                            className="font-medium text-foreground">{response.count} items</span>. The
-                                            dashboard will update when you close this window.
+                                            Successfully processed <span
+                                            className="font-medium text-foreground">{response.count} items</span>.
                                         </p>
                                     )}
 
@@ -222,19 +264,22 @@ export function IngestionPlayground() {
 
                     {/* Action Footer */}
                     <div className="mt-2 flex gap-3">
-                        {!response ? (
+                        {!response && !isPolling ? (
                             <Button onClick={handleSimulate} disabled={isLoading}
                                     className="w-full h-11 text-base shadow-sm">
                                 {isLoading ? <Loader2 className="mr-2 h-5 w-5 animate-spin"/> : "Run Simulation"}
                             </Button>
                         ) : (
                             <>
-                                <Button variant="outline" onClick={handleReset} className="flex-1 h-11">
+                                <Button variant="outline" onClick={handleReset} disabled={isPolling}
+                                        className="flex-1 h-11">
                                     <RefreshCw size={14} className="mr-2"/> Run Again
                                 </Button>
-                                <Button onClick={() => handleOpenChange(false)}
+                                <Button onClick={() => handleOpenChange(false)} disabled={isPolling}
                                         className="flex-1 h-11 bg-zinc-900 dark:bg-zinc-50 hover:bg-zinc-800 dark:hover:bg-zinc-200">
-                                    <Check size={16} className="mr-2"/> Done
+                                    {isPolling ? <Loader2 size={16} className="animate-spin mr-2"/> :
+                                        <Check size={16} className="mr-2"/>}
+                                    {isPolling ? "Waiting..." : "Done"}
                                 </Button>
                             </>
                         )}
