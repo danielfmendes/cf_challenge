@@ -1,6 +1,6 @@
 # Feedback Pulse 🚀
 
-**Live Demo:** [https://danielfreiremendes.com](https://danielfreiremendes.com)
+**Live Demo:** [https://cfchallenge.pages.dev](https://cfchallenge.pages.dev)
 
 **Feedback Pulse** is a real-time, AI-powered analytics dashboard that aggregates customer feedback from multiple
 sources (Discord, Twitter, Email, GitHub). It leverages Cloudflare's Edge AI to instantly analyze sentiment, calculate
