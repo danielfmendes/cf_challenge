@@ -8,7 +8,7 @@ binding = "AI"
 [[d1_databases]]
 binding = "DB"
 database_name = "feedback-db"
-database_id = "951cb9a9-5533-4084-99c4-7bfc0eda706b"
+database_id = ""
 
 [[vectorize]]
 binding = "VECTOR_INDEX"
