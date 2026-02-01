@@ -1,11 +1,5 @@
 import {IngestionWorkflow} from './workflow';
-
-export interface Env {
-    AI: any;
-    DB: D1Database;
-    VECTOR_INDEX: VectorizeIndex;
-    INGESTION_WORKFLOW: Workflow;
-}
+import {Env} from "./types";
 
 // 1. Centralized CORS & Response Helper
 const corsHeaders = {
